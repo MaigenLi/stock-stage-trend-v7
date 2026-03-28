@@ -43,17 +43,49 @@ STOCK_NAME_CACHE_FILE = os.path.join(WORK_DIR, "stock_name_cache.json")
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-DEFAULT_PARAMS: Dict[str, object] = {
-    'min_price': 3.0,
-    'max_price': 200.0,
-    'min_three_day_change': 3.0,
-    'max_three_day_change': 25.0,
-    'min_up_days': 2,
-    'min_avg_volume_ratio': 1.0,
-    'max_ten_day_change': 35.0,
-    'require_above_ma10': False,
-    'require_ma_trend': False,
+PRESET_PARAMS: Dict[str, Dict[str, object]] = {
+    'aggressive': {
+        'min_price': 2.0,
+        'max_price': 200.0,
+        'min_three_day_change': 2.0,
+        'max_three_day_change': 30.0,
+        'min_up_days': 2,
+        'min_avg_volume_ratio': 0.9,
+        'max_ten_day_change': 45.0,
+        'min_latest_amount': 5e7,
+        'min_avg_amount_5': 5e7,
+        'require_above_ma10': False,
+        'require_ma_trend': False,
+    },
+    'balanced': {
+        'min_price': 3.0,
+        'max_price': 200.0,
+        'min_three_day_change': 3.0,
+        'max_three_day_change': 25.0,
+        'min_up_days': 2,
+        'min_avg_volume_ratio': 1.0,
+        'max_ten_day_change': 35.0,
+        'min_latest_amount': 1e8,
+        'min_avg_amount_5': 1e8,
+        'require_above_ma10': False,
+        'require_ma_trend': False,
+    },
+    'conservative': {
+        'min_price': 5.0,
+        'max_price': 200.0,
+        'min_three_day_change': 4.0,
+        'max_three_day_change': 20.0,
+        'min_up_days': 3,
+        'min_avg_volume_ratio': 1.1,
+        'max_ten_day_change': 25.0,
+        'min_latest_amount': 3e8,
+        'min_avg_amount_5': 3e8,
+        'require_above_ma10': True,
+        'require_ma_trend': True,
+    },
 }
+DEFAULT_PRESET = 'balanced'
+DEFAULT_PARAMS: Dict[str, object] = PRESET_PARAMS[DEFAULT_PRESET].copy()
 STRATEGY_PARAMS: Dict[str, object] = DEFAULT_PARAMS.copy()
 
 STOCK_NAME_CACHE_LOCK = RLock()
@@ -87,16 +119,17 @@ def read_tdx_day(code: str) -> Optional[pd.DataFrame]:
                 struct.unpack('I', d[8:12])[0] / 100.0,
                 struct.unpack('I', d[12:16])[0] / 100.0,
                 struct.unpack('I', d[16:20])[0] / 100.0,
+                float(struct.unpack('f', d[20:24])[0]),
                 struct.unpack('I', d[24:28])[0],
             ])
 
         if not rows:
             return None
 
-        df = pd.DataFrame(rows, columns=['date_int', 'open', 'high', 'low', 'close', 'volume'])
+        df = pd.DataFrame(rows, columns=['date_int', 'open', 'high', 'low', 'close', 'amount', 'volume'])
         df['date'] = pd.to_datetime(df['date_int'].astype(str))
         df = df.sort_values('date').reset_index(drop=True)
-        df = df[(df['close'] > 0) & (df['volume'] > 0)]
+        df = df[(df['close'] > 0) & (df['volume'] > 0) & (df['amount'] > 0)]
         return df
     except Exception:
         return None
@@ -239,6 +272,34 @@ def is_st_stock(name: str) -> bool:
     return normalized_name.startswith('*ST') or normalized_name.startswith('ST')
 
 
+def format_amount_yi(amount: float) -> str:
+    return f'{amount / 1e8:.2f}亿'
+
+
+def resolve_strategy_params(args: argparse.Namespace) -> Dict[str, object]:
+    params = PRESET_PARAMS[args.preset].copy()
+
+    overrides = {
+        'min_price': args.min_price,
+        'max_price': args.max_price,
+        'min_three_day_change': args.min_three_day_change,
+        'max_three_day_change': args.max_three_day_change,
+        'min_up_days': args.min_up_days,
+        'min_avg_volume_ratio': args.min_avg_volume_ratio,
+        'max_ten_day_change': args.max_ten_day_change,
+        'min_latest_amount': args.min_latest_amount,
+        'min_avg_amount_5': args.min_avg_amount_5,
+        'require_above_ma10': args.require_above_ma10,
+        'require_ma_trend': args.require_ma_trend,
+    }
+
+    for key, value in overrides.items():
+        if value is not None:
+            params[key] = value
+
+    return params
+
+
 def get_stock_sector_info(code: str, name: str = '', allow_online: bool = True) -> Dict[str, object]:
     try:
         sector_info = get_sector_info().get_stock_sector_info(code, name, allow_online=allow_online)
@@ -307,7 +368,9 @@ def analyze_quality_metrics(df: pd.DataFrame) -> Dict[str, float]:
     recent['ma10'] = recent['close'].rolling(10).mean()
     recent['ma20'] = recent['close'].rolling(20).mean()
     recent['vol_ma5'] = recent['volume'].rolling(5).mean()
+    recent['amount_ma5'] = recent['amount'].rolling(5).mean()
     recent['volume_ratio'] = recent['volume'] / recent['vol_ma5']
+    recent['amount_ratio_5'] = recent['amount'] / recent['amount_ma5']
     recent['change_pct'] = recent['close'].pct_change() * 100
 
     latest = recent.iloc[-1]
@@ -317,12 +380,15 @@ def analyze_quality_metrics(df: pd.DataFrame) -> Dict[str, float]:
     latest_price = float(latest['close'])
     latest_change = float(latest['change_pct']) if pd.notna(latest['change_pct']) else 0.0
     latest_volume_ratio = float(latest['volume_ratio']) if pd.notna(latest['volume_ratio']) else 0.0
+    latest_amount = float(latest['amount']) if pd.notna(latest['amount']) else 0.0
+    latest_amount_ratio = float(latest['amount_ratio_5']) if pd.notna(latest['amount_ratio_5']) else 0.0
 
     start_price_3 = float(last_3.iloc[0]['close'])
     end_price_3 = float(last_3.iloc[-1]['close'])
     three_day_change = (end_price_3 - start_price_3) / start_price_3 * 100 if start_price_3 > 0 else 0.0
     up_days = int((last_3['change_pct'] > 0).sum())
     avg_volume_ratio = float(last_3['volume_ratio'].replace([np.inf, -np.inf], np.nan).fillna(0).mean())
+    avg_amount_5 = float(last_5['amount'].replace([np.inf, -np.inf], np.nan).fillna(0).mean()) if len(last_5) > 0 else 0.0
 
     if len(recent) >= 10:
         start_price_10 = float(recent.iloc[-10]['close'])
@@ -345,6 +411,9 @@ def analyze_quality_metrics(df: pd.DataFrame) -> Dict[str, float]:
         'up_days': up_days,
         'avg_volume_ratio': avg_volume_ratio,
         'latest_volume_ratio': latest_volume_ratio,
+        'latest_amount': latest_amount,
+        'avg_amount_5': avg_amount_5,
+        'latest_amount_ratio': latest_amount_ratio,
         'trend_strength': trend_strength,
         'ma5': ma5,
         'ma10': ma10,
@@ -370,6 +439,10 @@ def passes_hybrid_filters(metrics: Dict[str, float]) -> bool:
     if metrics['avg_volume_ratio'] < float(STRATEGY_PARAMS['min_avg_volume_ratio']):
         return False
     if metrics['ten_day_change'] > float(STRATEGY_PARAMS['max_ten_day_change']):
+        return False
+    if metrics['latest_amount'] < float(STRATEGY_PARAMS['min_latest_amount']):
+        return False
+    if metrics['avg_amount_5'] < float(STRATEGY_PARAMS['min_avg_amount_5']):
         return False
     if STRATEGY_PARAMS['require_above_ma10'] and not metrics['price_above_ma10']:
         return False
@@ -400,6 +473,18 @@ def calculate_hybrid_score(base_score: int, metrics: Dict[str, float], backtest_
     if metrics['latest_volume_ratio'] >= 1.8:
         score += 1.0
     elif metrics['latest_volume_ratio'] >= 1.3:
+        score += 0.5
+
+    if metrics['latest_amount_ratio'] >= 1.8:
+        score += 1.0
+    elif metrics['latest_amount_ratio'] >= 1.3:
+        score += 0.5
+
+    if metrics['avg_amount_5'] >= 8e8:
+        score += 1.5
+    elif metrics['avg_amount_5'] >= 3e8:
+        score += 1.0
+    elif metrics['avg_amount_5'] >= 1e8:
         score += 0.5
 
     if metrics['trend_strength'] >= 0.8:
@@ -551,6 +636,7 @@ def save_results(results: List[Dict[str, object]], scanned_count: int) -> Tuple[
             f.write(f"  回测次数: {r['backtest_signal_count']} 胜率: {r['backtest_win_rate']:.2%}\n")
             f.write(f"  价格: {r['latest_price']:.2f} 涨跌: {r['latest_change']:+.2f}% 三天: {r['three_day_change']:+.2f}% 十天: {r['ten_day_change']:+.2f}%\n")
             f.write(f"  量比: 三日均量比 {r['avg_volume_ratio']:.2f} 当日量比 {r['latest_volume_ratio']:.2f} 趋势强度 {r['trend_strength']:.1%}\n")
+            f.write(f"  成交额: 当日 {format_amount_yi(float(r['latest_amount']))} 五日均额 {format_amount_yi(float(r['avg_amount_5']))} 额比 {r['latest_amount_ratio']:.2f}\n")
             f.write(f"  均线: MA5 {r['ma5']:.2f} MA10 {r['ma10']:.2f} MA20 {r['ma20']:.2f}\n")
             f.write(f"  板块: {r['main_sector']} ({r['sector_category']})\n")
             f.write(f"  热度: {r['sector_hotness']} 人气: {r['sector_popularity']} 来源: {r['source']}\n\n")
@@ -563,7 +649,7 @@ def save_results(results: List[Dict[str, object]], scanned_count: int) -> Tuple[
         'code', 'name', 'score', 'base_score',
         'backtest_return', 'backtest_signal_count', 'backtest_win_rate',
         'latest_price', 'latest_change', 'three_day_change', 'ten_day_change',
-        'up_days', 'avg_volume_ratio', 'latest_volume_ratio', 'trend_strength',
+        'up_days', 'avg_volume_ratio', 'latest_volume_ratio', 'latest_amount', 'avg_amount_5', 'latest_amount_ratio', 'trend_strength',
         'ma5', 'ma10', 'ma20',
         'price_above_ma10', 'price_above_ma20', 'ma5_above_ma10', 'ma10_above_ma20',
         'main_sector', 'sector_category', 'sector_hotness', 'sector_popularity', 'source',
@@ -576,33 +662,26 @@ def save_results(results: List[Dict[str, object]], scanned_count: int) -> Tuple[
 
 def main():
     parser = argparse.ArgumentParser(description='V7 启动捕捉策略 - 混合增强版')
+    parser.add_argument('--preset', choices=list(PRESET_PARAMS.keys()), default=DEFAULT_PRESET, help='参数预设：aggressive / balanced / conservative')
     parser.add_argument('--limit', type=int, default=100, help='扫描股票数量，0表示全量')
     parser.add_argument('--all', action='store_true', help='扫描全部股票')
     parser.add_argument('--workers', type=int, default=8, help='并发线程数')
 
-    parser.add_argument('--min-price', type=float, default=float(DEFAULT_PARAMS['min_price']), help='最小价格(元)')
-    parser.add_argument('--max-price', type=float, default=float(DEFAULT_PARAMS['max_price']), help='最大价格(元)')
-    parser.add_argument('--min-three-day-change', type=float, default=float(DEFAULT_PARAMS['min_three_day_change']), help='最小三日涨幅(%)')
-    parser.add_argument('--max-three-day-change', type=float, default=float(DEFAULT_PARAMS['max_three_day_change']), help='最大三日涨幅(%)')
-    parser.add_argument('--min-up-days', type=int, default=int(DEFAULT_PARAMS['min_up_days']), help='三日内最少上涨天数')
-    parser.add_argument('--min-avg-volume-ratio', type=float, default=float(DEFAULT_PARAMS['min_avg_volume_ratio']), help='最小三日平均量比')
-    parser.add_argument('--max-ten-day-change', type=float, default=float(DEFAULT_PARAMS['max_ten_day_change']), help='最大十日涨幅(%)')
-    parser.add_argument('--require-above-ma10', action='store_true', help='要求最新价站上 MA10')
-    parser.add_argument('--require-ma-trend', action='store_true', help='要求 MA5>MA10 且 MA10>MA20')
+    parser.add_argument('--min-price', type=float, default=None, help='最小价格(元)')
+    parser.add_argument('--max-price', type=float, default=None, help='最大价格(元)')
+    parser.add_argument('--min-three-day-change', type=float, default=None, help='最小三日涨幅(%)')
+    parser.add_argument('--max-three-day-change', type=float, default=None, help='最大三日涨幅(%)')
+    parser.add_argument('--min-up-days', type=int, default=None, help='三日内最少上涨天数')
+    parser.add_argument('--min-avg-volume-ratio', type=float, default=None, help='最小三日平均量比')
+    parser.add_argument('--max-ten-day-change', type=float, default=None, help='最大十日涨幅(%)')
+    parser.add_argument('--min-latest-amount', type=float, default=None, help='最小当日成交额(元)')
+    parser.add_argument('--min-avg-amount-5', type=float, default=None, help='最小五日平均成交额(元)')
+    parser.add_argument('--require-above-ma10', action=argparse.BooleanOptionalAction, default=None, help='是否要求最新价站上 MA10')
+    parser.add_argument('--require-ma-trend', action=argparse.BooleanOptionalAction, default=None, help='是否要求 MA5>MA10 且 MA10>MA20')
     args = parser.parse_args()
 
     global STRATEGY_PARAMS
-    STRATEGY_PARAMS = {
-        'min_price': args.min_price,
-        'max_price': args.max_price,
-        'min_three_day_change': args.min_three_day_change,
-        'max_three_day_change': args.max_three_day_change,
-        'min_up_days': args.min_up_days,
-        'min_avg_volume_ratio': args.min_avg_volume_ratio,
-        'max_ten_day_change': args.max_ten_day_change,
-        'require_above_ma10': args.require_above_ma10,
-        'require_ma_trend': args.require_ma_trend,
-    }
+    STRATEGY_PARAMS = resolve_strategy_params(args)
 
     print('=' * 80)
     print('📈 V7 启动捕捉策略 - 混合增强版')
@@ -612,6 +691,7 @@ def main():
     print(f'工作目录: {WORK_DIR}')
     print(f'板块模块: {os.path.join(CURRENT_DIR, "stock_sector.py")}')
     print(f'名称缓存: {STOCK_NAME_CACHE_FILE}')
+    print(f'参数预设: {args.preset}')
     print('筛选参数:')
     for key, value in STRATEGY_PARAMS.items():
         print(f'  {key}: {value}')

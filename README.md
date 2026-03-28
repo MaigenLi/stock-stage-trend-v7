@@ -29,6 +29,8 @@ V7 启动捕捉策略项目。
 - 支持多线程并发处理
 - 自动排除 `ST` / `*ST` 股票
 - 混合使用“启动信号 + 趋势风控 + 回测统计”
+- 增加成交额 / 流动性过滤
+- 提供 `aggressive / balanced / conservative` 三套参数预设
 - 输出候选股票的：
   - 股票名称
   - 主板块
@@ -38,6 +40,7 @@ V7 启动捕捉策略项目。
   - 混合评分
   - 原始信号分
   - 回测收益 / 回测次数 / 胜率
+  - 成交额 / 流动性指标
 
 ---
 
@@ -116,32 +119,48 @@ python full_scan_gpt_v7.py --limit 200 --workers 8
 - `--limit`：扫描股票数量
 - `--workers`：并发线程数
 
-### 6.2 常用混合增强参数
+### 6.2 参数预设
+
+脚本内置三套预设：
+- `aggressive`：更激进，候选更多，容忍更高波动
+- `balanced`：默认预设，兼顾启动捕捉与风险控制
+- `conservative`：更保守，对趋势、成交额和涨幅要求更严格
+
+示例：
+
+```bash
+python full_scan_gpt_v7.py --all --workers 8 --preset balanced
+```
+
+### 6.3 常用混合增强参数
 
 ```bash
 python full_scan_gpt_v7.py \
   --all \
   --workers 8 \
+  --preset balanced \
   --min-price 3 \
   --max-price 200 \
   --min-three-day-change 3 \
   --max-three-day-change 25 \
   --min-up-days 2 \
   --min-avg-volume-ratio 1.0 \
-  --max-ten-day-change 35
+  --max-ten-day-change 35 \
+  --min-latest-amount 100000000 \
+  --min-avg-amount-5 100000000
 ```
 
 可选增强过滤：
-- `--require-above-ma10`：要求最新价站上 MA10
-- `--require-ma-trend`：要求 `MA5 > MA10 > MA20`
+- `--require-above-ma10` / `--no-require-above-ma10`
+- `--require-ma-trend` / `--no-require-ma-trend`
 
-### 6.3 全量扫描
+### 6.4 全量扫描
 
 ```bash
 python full_scan_gpt_v7.py --all --workers 8
 ```
 
-### 6.4 用 `limit=0` 表示全量
+### 6.5 用 `limit=0` 表示全量
 
 ```bash
 python full_scan_gpt_v7.py --limit 0 --workers 8
@@ -164,11 +183,12 @@ v7_candidates_YYYYMMDD_HHMMSS.txt
 
 ```text
 sh600250 南京商旅
-  评分: 12.50 (原始信号:8) 回测收益: 0.0030
-  回测次数: 6 胜率: 50.00%
-  价格: 12.91 涨跌: +3.53% 三天: +7.05% 十天: +12.40%
-  量比: 三日均量比 1.18 当日量比 1.62 趋势强度 80.0%
-  均线: MA5 12.20 MA10 11.85 MA20 11.30
+  评分: 18.50 (原始信号:8) 回测收益: 0.0030
+  回测次数: 43 胜率: 48.84%
+  价格: 12.91 涨跌: +3.53% 三天: +7.05% 十天: +11.01%
+  量比: 三日均量比 1.49 当日量比 1.35 趋势强度 80.0%
+  成交额: 当日 6.18亿 五日均额 3.50亿 额比 1.76
+  均线: MA5 12.07 MA10 11.84 MA20 11.50
   板块: 贸易Ⅱ (其他)
   热度: 40 人气: 32 来源: 10jqka
 ```
@@ -205,6 +225,9 @@ v7_candidates_YYYYMMDD_HHMMSS.csv
 - `avg_volume_ratio`
 - `latest_volume_ratio`
 - `trend_strength`
+- `latest_amount`
+- `avg_amount_5`
+- `latest_amount_ratio`
 - `ma5`
 - `ma10`
 - `ma20`
@@ -232,11 +255,16 @@ v7_candidates_YYYYMMDD_HHMMSS.csv
 - 上涨量能质量优于下跌量能
 - K线假突破过滤
 - 振幅收敛
+- 三日涨幅 / 十日涨幅过滤
+- 成交额 / 流动性过滤
+- 可选均线过滤
 
 最终生成：
 - `signal`：是否触发候选信号
-- `score`：信号评分
-- `backtest_return`：简单回测均值
+- `score`：混合增强后的综合评分
+- `backtest_return`：历史信号平均收益
+- `backtest_signal_count`：历史信号样本数
+- `backtest_win_rate`：历史信号胜率
 
 ---
 
