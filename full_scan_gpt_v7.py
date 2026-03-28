@@ -3,17 +3,18 @@
 """
 V7 启动捕捉策略 - 增强版
 
-改进：
+特性：
 1. 使用通达信离线数据目录 ~/stock_data/vipdoc/
 2. 使用股票代码文件 ~/stock_code/results/stock_codes.txt
 3. 工作目录固定在 ~/.openclaw/workspace/stock_stage_trend/
 4. 输出加入股票名称和板块信息
 5. 支持 limit / 全量扫描 / 结果排序保存
+6. 自动排除 ST / *ST 股票
+7. 仅依赖当前项目内置模块，不再依赖其它项目
 """
 
 import os
 import re
-import sys
 import json
 import struct
 import argparse
@@ -26,26 +27,18 @@ import pandas as pd
 import requests
 import warnings
 
+from stock_sector import get_sector_info
+
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 TDX_DATA_DIR = os.path.expanduser("~/stock_data/vipdoc/")
 STOCK_CODES_FILE = os.path.expanduser("~/stock_code/results/stock_codes.txt")
 WORK_DIR = os.path.expanduser("~/.openclaw/workspace/stock_stage_trend/")
 RESULTS_DIR = os.path.join(WORK_DIR, "results")
-CACHE_DIR = os.path.join(WORK_DIR, "sector_cache")
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 STOCK_NAME_CACHE_FILE = os.path.join(WORK_DIR, "stock_name_cache.json")
-STOCK_NAME_CACHE_CANDIDATES = [
-    STOCK_NAME_CACHE_FILE,
-]
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-# 只使用当前项目内置的板块模块，不再依赖 stock_trend 项目
-if CURRENT_DIR not in sys.path:
-    sys.path.insert(0, CURRENT_DIR)
-from stock_sector import get_sector_info
 
 COMMON_STOCKS = {
     'sh600519': '贵州茅台', 'sz000001': '平安银行', 'sz002460': '赣锋锂业',
@@ -62,26 +55,6 @@ COMMON_STOCKS = {
     'sz002415': '海康威视', 'sz002475': '立讯精密', 'sz002594': '比亚迪',
     'sz300059': '东方财富', 'sz300760': '迈瑞医疗'
 }
-
-SECTOR_KEYWORDS = {
-    '新能源': ['新能源', '光伏', '风电', '储能', '电池', '锂电', '锂业', '太阳能'],
-    '医药': ['医药', '制药', '生物', '医疗', '药业', '健康'],
-    '科技': ['科技', '技术', '软件', '信息', '电子', '通信', '智能', '网络', '数据'],
-    '消费': ['酒', '食品', '饮料', '餐饮', '零售', '百货', '消费'],
-    '金融': ['银行', '证券', '保险', '信托', '金融', '投资'],
-    '制造': ['制造', '工业', '机械', '设备', '工程', '重工'],
-    '资源': ['矿业', '金属', '矿产', '资源', '煤炭', '石油', '钢铁'],
-}
-
-SECTOR_CATEGORY = {
-    '新能源': '科技', '医药': '医疗', '科技': '科技', '消费': '消费',
-    '金融': '金融', '制造': '制造', '资源': '资源', '白酒Ⅱ': '消费',
-    '银行': '金融', '保险': '金融', '证券': '金融', '能源金属': '资源',
-    '化学制药': '医疗'
-}
-
-HOT_SECTORS = {'白酒Ⅱ', '新能源', '人工智能', '芯片', '医药', '光伏', '锂电池'}
-MEDIUM_SECTORS = {'银行', '保险', '证券', '消费', '汽车', '家电', '房地产', '能源金属', '化学制药'}
 
 STOCK_NAME_CACHE_LOCK = RLock()
 STOCK_NAME_CACHE = None
@@ -104,7 +77,7 @@ def read_tdx_day(code: str):
             data = f.read()
         rows = []
         for i in range(0, len(data), 32):
-            d = data[i:i+32]
+            d = data[i:i + 32]
             if len(d) < 32:
                 continue
             rows.append([
@@ -132,19 +105,16 @@ def _load_stock_name_cache():
         if STOCK_NAME_CACHE is not None:
             return STOCK_NAME_CACHE
 
-        merged_cache = {}
-        for cache_file in STOCK_NAME_CACHE_CANDIDATES:
-            if not os.path.exists(cache_file):
-                continue
-            try:
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        merged_cache.update(data)
-            except Exception:
-                continue
+        if not os.path.exists(STOCK_NAME_CACHE_FILE):
+            STOCK_NAME_CACHE = {}
+            return STOCK_NAME_CACHE
 
-        STOCK_NAME_CACHE = merged_cache
+        try:
+            with open(STOCK_NAME_CACHE_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            STOCK_NAME_CACHE = data if isinstance(data, dict) else {}
+        except Exception:
+            STOCK_NAME_CACHE = {}
         return STOCK_NAME_CACHE
 
 
@@ -262,53 +232,22 @@ def is_st_stock(name: str) -> bool:
         return False
 
     normalized_name = name.strip().upper().replace(' ', '')
-    return normalized_name.startswith('ST') or normalized_name.startswith('*ST')
+    return normalized_name.startswith('*ST') or normalized_name.startswith('ST')
 
 
-def _sector_hotness_popularity(sector: str):
-    if sector in HOT_SECTORS:
-        return 70, 80
-    if sector in MEDIUM_SECTORS:
-        return 50, 60
-    return 40, 40
-
-
-def infer_sector_from_name(name: str):
-    if not name or name == '未知':
-        return {
-            'main_sector': '未知', 'sector_hotness': 40, 'sector_popularity': 30,
-            'sector_category': '其他', 'source': 'inferred'
-        }
-    for sector, words in SECTOR_KEYWORDS.items():
-        if any(word in name for word in words):
-            hotness, popularity = _sector_hotness_popularity(sector)
-            return {
-                'main_sector': sector,
-                'sector_hotness': hotness,
-                'sector_popularity': popularity,
-                'sector_category': SECTOR_CATEGORY.get(sector, '其他'),
-                'source': 'inferred'
-            }
-    return {
-        'main_sector': '其他', 'sector_hotness': 40, 'sector_popularity': 30,
-        'sector_category': '其他', 'source': 'inferred'
-    }
-
-
-def _normalize_sector_info(sector_info: dict, name: str = ''):
-    if not sector_info:
-        return infer_sector_from_name(name)
-
-    hotness = sector_info.get('sector_hotness', sector_info.get('hotness', 40))
-    popularity = sector_info.get('sector_popularity', sector_info.get('popularity', 30))
+def get_stock_sector_info(code: str, name: str = '', allow_online: bool = True):
+    try:
+        sector_info = get_sector_info().get_stock_sector_info(code, name, allow_online=allow_online)
+    except Exception:
+        sector_info = {}
 
     try:
-        hotness = int(round(float(hotness)))
+        hotness = int(round(float(sector_info.get('sector_hotness', 40))))
     except Exception:
         hotness = 40
 
     try:
-        popularity = int(round(float(popularity)))
+        popularity = int(round(float(sector_info.get('sector_popularity', 30))))
     except Exception:
         popularity = 30
 
@@ -316,66 +255,9 @@ def _normalize_sector_info(sector_info: dict, name: str = ''):
         'main_sector': sector_info.get('main_sector', '未知'),
         'sector_hotness': hotness,
         'sector_popularity': popularity,
-        'sector_category': sector_info.get('sector_category', sector_info.get('category', '其他')),
-        'source': sector_info.get('source', 'unknown'),
+        'sector_category': sector_info.get('sector_category', '其他'),
+        'source': sector_info.get('source', 'inferred'),
     }
-
-
-def get_stock_sector_info(code: str, name: str = ''):
-    try:
-        sector_info = get_sector_info().get_stock_sector_info(code, name)
-        return _normalize_sector_info(sector_info, name)
-    except Exception:
-        pass
-
-    cache_file = os.path.join(CACHE_DIR, f'{code}.json')
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
-
-    try:
-        if code.startswith('sh'):
-            market, stock_code = 'sh', code[2:]
-        elif code.startswith('sz'):
-            market, stock_code = 'sz', code[2:]
-        else:
-            return infer_sector_from_name(name)
-
-        url = f'http://quote.eastmoney.com/{market}{stock_code}.html'
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'http://quote.eastmoney.com/',
-        }
-        r = requests.get(url, headers=headers, timeout=3, verify=False)
-        if r.status_code == 200:
-            m = re.search(r'var quotedata = ({[^}]+})', r.text)
-            if m:
-                quotedata = json.loads(m.group(1))
-                sector = quotedata.get('bk_name', '未知')
-                hotness, popularity = _sector_hotness_popularity(sector)
-                result = {
-                    'main_sector': sector,
-                    'sector_hotness': hotness,
-                    'sector_popularity': popularity,
-                    'sector_category': SECTOR_CATEGORY.get(sector, '其他'),
-                    'source': 'eastmoney'
-                }
-                with open(cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, ensure_ascii=False, indent=2)
-                return result
-    except Exception:
-        pass
-
-    result = infer_sector_from_name(name)
-    try:
-        with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-    return result
 
 
 def calc_signal(df):
@@ -459,10 +341,7 @@ def evaluate_stock(code: str):
     if is_st_stock(name):
         return None
 
-    if signal:
-        sector_info = get_stock_sector_info(code, name)
-    else:
-        sector_info = infer_sector_from_name(name)
+    sector_info = get_stock_sector_info(code, name, allow_online=signal)
 
     return {
         'code': code,
@@ -534,6 +413,7 @@ def main():
     print(f'股票代码文件: {STOCK_CODES_FILE}')
     print(f'工作目录: {WORK_DIR}')
     print(f'板块模块: {os.path.join(CURRENT_DIR, "stock_sector.py")}')
+    print(f'名称缓存: {STOCK_NAME_CACHE_FILE}')
     print()
 
     codes = load_stock_codes(limit=args.limit, all_stocks=args.all)
