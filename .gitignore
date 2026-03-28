@@ -1,0 +1,8 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Generated outputs
+results/
+sector_cache/
+stock_name_cache.json
