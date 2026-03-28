@@ -21,12 +21,14 @@ import argparse
 from threading import RLock
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import requests
 import warnings
 
+from stock_names import STOCK_NAME_MAP
 from stock_sector import get_sector_info
 
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
@@ -40,27 +42,11 @@ STOCK_NAME_CACHE_FILE = os.path.join(WORK_DIR, "stock_name_cache.json")
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-COMMON_STOCKS = {
-    'sh600519': '贵州茅台', 'sz000001': '平安银行', 'sz002460': '赣锋锂业',
-    'sh600036': '招商银行', 'sz000858': '五粮液', 'sh600030': '中信证券',
-    'sz300750': '宁德时代', 'sh600276': '恒瑞医药', 'sh600000': '浦发银行',
-    'sh600016': '民生银行', 'sh600028': '中国石化', 'sh600031': '三一重工',
-    'sh600048': '保利发展', 'sh600050': '中国联通', 'sh600104': '上汽集团',
-    'sh600309': '万华化学', 'sh600547': '山东黄金', 'sh600585': '海螺水泥',
-    'sh600690': '海尔智家', 'sh600837': '海通证券', 'sh600887': '伊利股份',
-    'sh600900': '长江电力', 'sh601318': '中国平安', 'sh601328': '交通银行',
-    'sh601398': '工商银行', 'sh601668': '中国建筑', 'sh601857': '中国石油',
-    'sh601919': '中远海控', 'sh601988': '中国银行', 'sz000002': '万科A',
-    'sz000063': '中兴通讯', 'sz000333': '美的集团', 'sz002230': '科大讯飞',
-    'sz002415': '海康威视', 'sz002475': '立讯精密', 'sz002594': '比亚迪',
-    'sz300059': '东方财富', 'sz300760': '迈瑞医疗'
-}
-
 STOCK_NAME_CACHE_LOCK = RLock()
 STOCK_NAME_CACHE = None
 
 
-def read_tdx_day(code: str):
+def read_tdx_day(code: str) -> Optional[pd.DataFrame]:
     if code.startswith('sh'):
         market, code_num = 'sh', code[2:]
     elif code.startswith('sz'):
@@ -99,7 +85,7 @@ def read_tdx_day(code: str):
         return None
 
 
-def _load_stock_name_cache():
+def _load_stock_name_cache() -> Dict[str, str]:
     global STOCK_NAME_CACHE
     with STOCK_NAME_CACHE_LOCK:
         if STOCK_NAME_CACHE is not None:
@@ -118,7 +104,7 @@ def _load_stock_name_cache():
         return STOCK_NAME_CACHE
 
 
-def _cache_stock_name(code: str, name: str):
+def _cache_stock_name(code: str, name: str) -> None:
     if not name or name == '未知':
         return
 
@@ -138,7 +124,7 @@ def _get_stock_name_from_local(code: str) -> str:
     cache = _load_stock_name_cache()
     if code in cache and cache[code]:
         return cache[code]
-    return COMMON_STOCKS.get(code, '未知')
+    return STOCK_NAME_MAP.get(code, '未知')
 
 
 def _get_stock_name_from_sina(code: str) -> str:
@@ -235,7 +221,7 @@ def is_st_stock(name: str) -> bool:
     return normalized_name.startswith('*ST') or normalized_name.startswith('ST')
 
 
-def get_stock_sector_info(code: str, name: str = '', allow_online: bool = True):
+def get_stock_sector_info(code: str, name: str = '', allow_online: bool = True) -> Dict[str, object]:
     try:
         sector_info = get_sector_info().get_stock_sector_info(code, name, allow_online=allow_online)
     except Exception:
@@ -260,7 +246,7 @@ def get_stock_sector_info(code: str, name: str = '', allow_online: bool = True):
     }
 
 
-def calc_signal(df):
+def calc_signal(df: pd.DataFrame) -> Tuple[bool, int]:
     if len(df) < 30:
         return False, 0
 
@@ -297,7 +283,7 @@ def calc_signal(df):
     return signal, score
 
 
-def backtest(df):
+def backtest(df: pd.DataFrame) -> float:
     if len(df) < 40:
         return 0
     returns = []
@@ -311,7 +297,7 @@ def backtest(df):
     return np.mean(returns) if returns else 0
 
 
-def load_stock_codes(limit: int = 100, all_stocks: bool = False):
+def load_stock_codes(limit: int = 100, all_stocks: bool = False) -> List[str]:
     codes = []
     with open(STOCK_CODES_FILE, 'r', encoding='utf-8') as f:
         for line in f:
@@ -323,7 +309,7 @@ def load_stock_codes(limit: int = 100, all_stocks: bool = False):
     return codes[:limit]
 
 
-def evaluate_stock(code: str):
+def evaluate_stock(code: str) -> Optional[Dict[str, object]]:
     df = read_tdx_day(code)
     if df is None or len(df) < 40:
         return None
@@ -356,7 +342,7 @@ def evaluate_stock(code: str):
     }
 
 
-def run_screening(codes, workers=8):
+def run_screening(codes: List[str], workers: int = 8) -> List[Dict[str, object]]:
     results = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(evaluate_stock, code): code for code in codes}
@@ -372,7 +358,7 @@ def run_screening(codes, workers=8):
     return results
 
 
-def save_results(results, scanned_count):
+def save_results(results: List[Dict[str, object]], scanned_count: int):
     signal_results = [r for r in results if r['signal']]
     signal_results.sort(key=lambda x: (-x['score'], -x['backtest_return']))
 

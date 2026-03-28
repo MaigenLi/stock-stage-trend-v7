@@ -15,6 +15,8 @@ V7 启动捕捉策略项目。
 
 - `full_scan_gpt_v7.py`：主扫描脚本
 - `stock_sector.py`：项目内置板块信息模块（已精简）
+- `stock_names.py`：项目内置常见股票名称映射
+- `requirements.txt`：Python 依赖列表
 
 ---
 
@@ -42,7 +44,7 @@ V7 启动捕捉策略项目。
 ### 股票名称
 名称获取顺序：
 1. 当前项目本地缓存 `stock_name_cache.json`
-2. 当前脚本内置常见股票名称映射
+2. `stock_names.py` 内置常见股票名称映射
 3. 新浪财经接口
 4. 东方财富页面回退解析
 
@@ -74,10 +76,10 @@ V7 启动捕捉策略项目。
 - `pandas`
 - `requests`
 
-如未安装，可执行：
+推荐直接使用项目内的依赖文件：
 
 ```bash
-pip install numpy pandas requests
+pip install -r requirements.txt
 ```
 
 ---
