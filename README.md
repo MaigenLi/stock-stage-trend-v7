@@ -130,7 +130,7 @@ python full_scan_gpt_v7.py --limit 0 --workers 8
 
 ## 7. 输出说明
 
-运行完成后会在 `results/` 下生成两类文件：
+运行完成后会在 `results/` 下生成三类文件：
 
 ### 详细结果文件
 格式类似：
@@ -157,6 +157,29 @@ v7_candidates_YYYYMMDD_HHMMSS_codes.txt
 ```
 
 只包含候选股票代码，方便后续联动其它脚本。
+
+### CSV 结构化结果文件
+格式类似：
+
+```text
+v7_candidates_YYYYMMDD_HHMMSS.csv
+```
+
+字段包括：
+- `code`
+- `name`
+- `score`
+- `backtest_return`
+- `latest_price`
+- `latest_change`
+- `three_day_change`
+- `main_sector`
+- `sector_category`
+- `sector_hotness`
+- `sector_popularity`
+- `source`
+
+适合直接用 Excel、WPS、pandas 做二次筛选和统计。
 
 ---
 

@@ -358,13 +358,14 @@ def run_screening(codes: List[str], workers: int = 8) -> List[Dict[str, object]]
     return results
 
 
-def save_results(results: List[Dict[str, object]], scanned_count: int):
+def save_results(results: List[Dict[str, object]], scanned_count: int) -> Tuple[str, str, str, List[Dict[str, object]]]:
     signal_results = [r for r in results if r['signal']]
     signal_results.sort(key=lambda x: (-x['score'], -x['backtest_return']))
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     result_path = os.path.join(RESULTS_DIR, f'v7_candidates_{ts}.txt')
     code_path = os.path.join(RESULTS_DIR, f'v7_candidates_{ts}_codes.txt')
+    csv_path = os.path.join(RESULTS_DIR, f'v7_candidates_{ts}.csv')
 
     with open(result_path, 'w', encoding='utf-8') as f:
         f.write('# V7 启动捕捉策略结果\n')
@@ -382,7 +383,18 @@ def save_results(results: List[Dict[str, object]], scanned_count: int):
         for r in signal_results:
             f.write(f"{r['code']}\n")
 
-    return result_path, code_path, signal_results
+    csv_columns = [
+        'code', 'name', 'score', 'backtest_return',
+        'latest_price', 'latest_change', 'three_day_change',
+        'main_sector', 'sector_category', 'sector_hotness', 'sector_popularity', 'source',
+    ]
+    csv_rows = []
+    for r in signal_results:
+        csv_rows.append({col: r.get(col) for col in csv_columns})
+
+    pd.DataFrame(csv_rows, columns=csv_columns).to_csv(csv_path, index=False, encoding='utf-8-sig')
+
+    return result_path, code_path, csv_path, signal_results
 
 
 def main():
@@ -407,7 +419,7 @@ def main():
     print('⏳ 开始筛选...')
 
     results = run_screening(codes, workers=args.workers)
-    result_path, code_path, signal_results = save_results(results, len(codes))
+    result_path, code_path, csv_path, signal_results = save_results(results, len(codes))
 
     print(f'\n✅ 筛选完成')
     print(f'处理股票: {len(codes)}只')
@@ -422,6 +434,7 @@ def main():
 
     print(f'\n结果文件: {result_path}')
     print(f'代码文件: {code_path}')
+    print(f'CSV文件: {csv_path}')
     print('=' * 80)
 
 
