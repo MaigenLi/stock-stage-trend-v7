@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-V7 启动捕捉策略 - 增强版
+V7 启动捕捉策略 - 混合增强版
 
 特性：
 1. 使用通达信离线数据目录 ~/stock_data/vipdoc/
@@ -11,6 +11,7 @@ V7 启动捕捉策略 - 增强版
 5. 支持 limit / 全量扫描 / 结果排序保存
 6. 自动排除 ST / *ST 股票
 7. 仅依赖当前项目内置模块，不再依赖其它项目
+8. 融合趋势过滤、三天表现过滤、十天风险控制与简化回测统计
 """
 
 import os
@@ -42,8 +43,21 @@ STOCK_NAME_CACHE_FILE = os.path.join(WORK_DIR, "stock_name_cache.json")
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
+DEFAULT_PARAMS: Dict[str, object] = {
+    'min_price': 3.0,
+    'max_price': 200.0,
+    'min_three_day_change': 3.0,
+    'max_three_day_change': 25.0,
+    'min_up_days': 2,
+    'min_avg_volume_ratio': 1.0,
+    'max_ten_day_change': 35.0,
+    'require_above_ma10': False,
+    'require_ma_trend': False,
+}
+STRATEGY_PARAMS: Dict[str, object] = DEFAULT_PARAMS.copy()
+
 STOCK_NAME_CACHE_LOCK = RLock()
-STOCK_NAME_CACHE = None
+STOCK_NAME_CACHE: Optional[Dict[str, str]] = None
 
 
 def read_tdx_day(code: str) -> Optional[pd.DataFrame]:
@@ -61,6 +75,7 @@ def read_tdx_day(code: str) -> Optional[pd.DataFrame]:
     try:
         with open(path, 'rb') as f:
             data = f.read()
+
         rows = []
         for i in range(0, len(data), 32):
             d = data[i:i + 32]
@@ -74,8 +89,10 @@ def read_tdx_day(code: str) -> Optional[pd.DataFrame]:
                 struct.unpack('I', d[16:20])[0] / 100.0,
                 struct.unpack('I', d[24:28])[0],
             ])
+
         if not rows:
             return None
+
         df = pd.DataFrame(rows, columns=['date_int', 'open', 'high', 'low', 'close', 'volume'])
         df['date'] = pd.to_datetime(df['date_int'].astype(str))
         df = df.sort_values('date').reset_index(drop=True)
@@ -101,6 +118,7 @@ def _load_stock_name_cache() -> Dict[str, str]:
             STOCK_NAME_CACHE = data if isinstance(data, dict) else {}
         except Exception:
             STOCK_NAME_CACHE = {}
+
         return STOCK_NAME_CACHE
 
 
@@ -283,18 +301,172 @@ def calc_signal(df: pd.DataFrame) -> Tuple[bool, int]:
     return signal, score
 
 
-def backtest(df: pd.DataFrame) -> float:
+def analyze_quality_metrics(df: pd.DataFrame) -> Dict[str, float]:
+    recent = df.copy()
+    recent['ma5'] = recent['close'].rolling(5).mean()
+    recent['ma10'] = recent['close'].rolling(10).mean()
+    recent['ma20'] = recent['close'].rolling(20).mean()
+    recent['vol_ma5'] = recent['volume'].rolling(5).mean()
+    recent['volume_ratio'] = recent['volume'] / recent['vol_ma5']
+    recent['change_pct'] = recent['close'].pct_change() * 100
+
+    latest = recent.iloc[-1]
+    last_3 = recent.iloc[-3:]
+    last_5 = recent.iloc[-5:]
+
+    latest_price = float(latest['close'])
+    latest_change = float(latest['change_pct']) if pd.notna(latest['change_pct']) else 0.0
+    latest_volume_ratio = float(latest['volume_ratio']) if pd.notna(latest['volume_ratio']) else 0.0
+
+    start_price_3 = float(last_3.iloc[0]['close'])
+    end_price_3 = float(last_3.iloc[-1]['close'])
+    three_day_change = (end_price_3 - start_price_3) / start_price_3 * 100 if start_price_3 > 0 else 0.0
+    up_days = int((last_3['change_pct'] > 0).sum())
+    avg_volume_ratio = float(last_3['volume_ratio'].replace([np.inf, -np.inf], np.nan).fillna(0).mean())
+
+    if len(recent) >= 10:
+        start_price_10 = float(recent.iloc[-10]['close'])
+        end_price_10 = float(recent.iloc[-1]['close'])
+        ten_day_change = (end_price_10 - start_price_10) / start_price_10 * 100 if start_price_10 > 0 else 0.0
+    else:
+        ten_day_change = 0.0
+
+    trend_strength = float((last_5['change_pct'] > 0).sum() / len(last_5)) if len(last_5) > 0 else 0.0
+
+    ma5 = float(latest['ma5']) if pd.notna(latest['ma5']) else 0.0
+    ma10 = float(latest['ma10']) if pd.notna(latest['ma10']) else 0.0
+    ma20 = float(latest['ma20']) if pd.notna(latest['ma20']) else 0.0
+
+    return {
+        'latest_price': latest_price,
+        'latest_change': latest_change,
+        'three_day_change': three_day_change,
+        'ten_day_change': ten_day_change,
+        'up_days': up_days,
+        'avg_volume_ratio': avg_volume_ratio,
+        'latest_volume_ratio': latest_volume_ratio,
+        'trend_strength': trend_strength,
+        'ma5': ma5,
+        'ma10': ma10,
+        'ma20': ma20,
+        'price_above_ma10': latest_price > ma10 if ma10 > 0 else False,
+        'price_above_ma20': latest_price > ma20 if ma20 > 0 else False,
+        'ma5_above_ma10': ma5 > ma10 if ma5 > 0 and ma10 > 0 else False,
+        'ma10_above_ma20': ma10 > ma20 if ma10 > 0 and ma20 > 0 else False,
+    }
+
+
+def passes_hybrid_filters(metrics: Dict[str, float]) -> bool:
+    if metrics['latest_price'] < float(STRATEGY_PARAMS['min_price']):
+        return False
+    if metrics['latest_price'] > float(STRATEGY_PARAMS['max_price']):
+        return False
+    if metrics['three_day_change'] < float(STRATEGY_PARAMS['min_three_day_change']):
+        return False
+    if metrics['three_day_change'] > float(STRATEGY_PARAMS['max_three_day_change']):
+        return False
+    if metrics['up_days'] < int(STRATEGY_PARAMS['min_up_days']):
+        return False
+    if metrics['avg_volume_ratio'] < float(STRATEGY_PARAMS['min_avg_volume_ratio']):
+        return False
+    if metrics['ten_day_change'] > float(STRATEGY_PARAMS['max_ten_day_change']):
+        return False
+    if STRATEGY_PARAMS['require_above_ma10'] and not metrics['price_above_ma10']:
+        return False
+    if STRATEGY_PARAMS['require_ma_trend'] and not (metrics['ma5_above_ma10'] and metrics['ma10_above_ma20']):
+        return False
+    return True
+
+
+def calculate_hybrid_score(base_score: int, metrics: Dict[str, float], backtest_info: Dict[str, float]) -> float:
+    score = float(base_score)
+
+    three_day_change = metrics['three_day_change']
+    if 3.0 <= three_day_change <= 8.0:
+        score += 2.0
+    elif 8.0 < three_day_change <= 15.0:
+        score += 1.5
+    elif 15.0 < three_day_change <= 25.0:
+        score += 0.5
+
+    avg_volume_ratio = metrics['avg_volume_ratio']
+    if avg_volume_ratio >= 1.5:
+        score += 2.0
+    elif avg_volume_ratio >= 1.2:
+        score += 1.0
+    elif avg_volume_ratio >= 1.0:
+        score += 0.5
+
+    if metrics['latest_volume_ratio'] >= 1.8:
+        score += 1.0
+    elif metrics['latest_volume_ratio'] >= 1.3:
+        score += 0.5
+
+    if metrics['trend_strength'] >= 0.8:
+        score += 2.0
+    elif metrics['trend_strength'] >= 0.6:
+        score += 1.0
+
+    if metrics['price_above_ma10']:
+        score += 1.0
+    if metrics['ma5_above_ma10']:
+        score += 1.0
+    if metrics['ma10_above_ma20']:
+        score += 1.0
+
+    ten_day_change = metrics['ten_day_change']
+    if ten_day_change <= 20.0:
+        score += 1.0
+    elif ten_day_change <= 30.0:
+        score += 0.5
+
+    signal_count = backtest_info['backtest_signal_count']
+    if signal_count >= 8:
+        score += 1.0
+    elif signal_count >= 4:
+        score += 0.5
+
+    win_rate = backtest_info['backtest_win_rate']
+    if win_rate >= 0.6:
+        score += 1.0
+    elif win_rate >= 0.5:
+        score += 0.5
+
+    return round(score, 2)
+
+
+def backtest(df: pd.DataFrame) -> Dict[str, float]:
     if len(df) < 40:
-        return 0
-    returns = []
+        return {
+            'backtest_return': 0.0,
+            'backtest_signal_count': 0,
+            'backtest_win_rate': 0.0,
+        }
+
+    returns: List[float] = []
+    wins = 0
     for i in range(30, len(df) - 2):
         sub_df = df.iloc[:i + 1]
         signal, _ = calc_signal(sub_df)
         if signal:
-            buy_price = df['open'].iloc[i + 1]
-            sell_price = df['close'].iloc[i + 2]
-            returns.append((sell_price - buy_price) / buy_price)
-    return np.mean(returns) if returns else 0
+            buy_price = float(df['open'].iloc[i + 1])
+            sell_price = float(df['close'].iloc[i + 2])
+            if buy_price <= 0:
+                continue
+            ret = (sell_price - buy_price) / buy_price
+            returns.append(ret)
+            if ret > 0:
+                wins += 1
+
+    signal_count = len(returns)
+    avg_return = float(np.mean(returns)) if returns else 0.0
+    win_rate = float(wins / signal_count) if signal_count else 0.0
+
+    return {
+        'backtest_return': avg_return,
+        'backtest_signal_count': signal_count,
+        'backtest_win_rate': win_rate,
+    }
 
 
 def load_stock_codes(limit: int = 100, all_stocks: bool = False) -> List[str]:
@@ -314,30 +486,30 @@ def evaluate_stock(code: str) -> Optional[Dict[str, object]]:
     if df is None or len(df) < 40:
         return None
 
-    signal, score = calc_signal(df)
-    bt_ret = backtest(df) if signal else 0
-    latest_price = df['close'].iloc[-1]
-    latest_change = (df['close'].iloc[-1] - df['close'].iloc[-2]) / df['close'].iloc[-2] * 100
-    three_day_change = (df['close'].iloc[-1] - df['close'].iloc[-3]) / df['close'].iloc[-3] * 100 if len(df) >= 3 else 0
+    signal, base_score = calc_signal(df)
+    if not signal:
+        return None
 
-    # 只对候选股票走网络名称/板块获取，避免全量扫描时对全部股票发请求
-    name = get_stock_name(code, allow_network=signal)
+    metrics = analyze_quality_metrics(df)
+    if not passes_hybrid_filters(metrics):
+        return None
 
-    # 排除 ST / *ST 股票，避免进入候选结果
+    name = get_stock_name(code, allow_network=True)
     if is_st_stock(name):
         return None
 
-    sector_info = get_stock_sector_info(code, name, allow_online=signal)
+    sector_info = get_stock_sector_info(code, name, allow_online=True)
+    backtest_info = backtest(df)
+    final_score = calculate_hybrid_score(base_score, metrics, backtest_info)
 
     return {
         'code': code,
         'name': name,
         'signal': signal,
-        'score': score,
-        'backtest_return': bt_ret,
-        'latest_price': latest_price,
-        'latest_change': latest_change,
-        'three_day_change': three_day_change,
+        'base_score': base_score,
+        'score': final_score,
+        **metrics,
+        **backtest_info,
         **sector_info,
     }
 
@@ -360,7 +532,7 @@ def run_screening(codes: List[str], workers: int = 8) -> List[Dict[str, object]]
 
 def save_results(results: List[Dict[str, object]], scanned_count: int) -> Tuple[str, str, str, List[Dict[str, object]]]:
     signal_results = [r for r in results if r['signal']]
-    signal_results.sort(key=lambda x: (-x['score'], -x['backtest_return']))
+    signal_results.sort(key=lambda x: (-float(x['score']), -float(x['backtest_return'])))
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     result_path = os.path.join(RESULTS_DIR, f'v7_candidates_{ts}.txt')
@@ -368,14 +540,18 @@ def save_results(results: List[Dict[str, object]], scanned_count: int) -> Tuple[
     csv_path = os.path.join(RESULTS_DIR, f'v7_candidates_{ts}.csv')
 
     with open(result_path, 'w', encoding='utf-8') as f:
-        f.write('# V7 启动捕捉策略结果\n')
+        f.write('# V7 启动捕捉策略 - 混合增强版结果\n')
         f.write(f'# 生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
         f.write(f'# 扫描股票: {scanned_count}只\n')
-        f.write(f'# 候选股票: {len(signal_results)}只\n\n')
+        f.write(f'# 候选股票: {len(signal_results)}只\n')
+        f.write(f'# 参数: {json.dumps(STRATEGY_PARAMS, ensure_ascii=False)}\n\n')
         for r in signal_results:
             f.write(f"{r['code']} {r['name']}\n")
-            f.write(f"  评分: {r['score']} 回测收益: {r['backtest_return']:.4f}\n")
-            f.write(f"  价格: {r['latest_price']:.2f} 涨跌: {r['latest_change']:+.2f}% 三天: {r['three_day_change']:+.2f}%\n")
+            f.write(f"  评分: {r['score']:.2f} (原始信号:{r['base_score']}) 回测收益: {r['backtest_return']:.4f}\n")
+            f.write(f"  回测次数: {r['backtest_signal_count']} 胜率: {r['backtest_win_rate']:.2%}\n")
+            f.write(f"  价格: {r['latest_price']:.2f} 涨跌: {r['latest_change']:+.2f}% 三天: {r['three_day_change']:+.2f}% 十天: {r['ten_day_change']:+.2f}%\n")
+            f.write(f"  量比: 三日均量比 {r['avg_volume_ratio']:.2f} 当日量比 {r['latest_volume_ratio']:.2f} 趋势强度 {r['trend_strength']:.1%}\n")
+            f.write(f"  均线: MA5 {r['ma5']:.2f} MA10 {r['ma10']:.2f} MA20 {r['ma20']:.2f}\n")
             f.write(f"  板块: {r['main_sector']} ({r['sector_category']})\n")
             f.write(f"  热度: {r['sector_hotness']} 人气: {r['sector_popularity']} 来源: {r['source']}\n\n")
 
@@ -384,34 +560,61 @@ def save_results(results: List[Dict[str, object]], scanned_count: int) -> Tuple[
             f.write(f"{r['code']}\n")
 
     csv_columns = [
-        'code', 'name', 'score', 'backtest_return',
-        'latest_price', 'latest_change', 'three_day_change',
+        'code', 'name', 'score', 'base_score',
+        'backtest_return', 'backtest_signal_count', 'backtest_win_rate',
+        'latest_price', 'latest_change', 'three_day_change', 'ten_day_change',
+        'up_days', 'avg_volume_ratio', 'latest_volume_ratio', 'trend_strength',
+        'ma5', 'ma10', 'ma20',
+        'price_above_ma10', 'price_above_ma20', 'ma5_above_ma10', 'ma10_above_ma20',
         'main_sector', 'sector_category', 'sector_hotness', 'sector_popularity', 'source',
     ]
-    csv_rows = []
-    for r in signal_results:
-        csv_rows.append({col: r.get(col) for col in csv_columns})
-
+    csv_rows = [{col: r.get(col) for col in csv_columns} for r in signal_results]
     pd.DataFrame(csv_rows, columns=csv_columns).to_csv(csv_path, index=False, encoding='utf-8-sig')
 
     return result_path, code_path, csv_path, signal_results
 
 
 def main():
-    parser = argparse.ArgumentParser(description='V7 启动捕捉策略增强版')
+    parser = argparse.ArgumentParser(description='V7 启动捕捉策略 - 混合增强版')
     parser.add_argument('--limit', type=int, default=100, help='扫描股票数量，0表示全量')
     parser.add_argument('--all', action='store_true', help='扫描全部股票')
     parser.add_argument('--workers', type=int, default=8, help='并发线程数')
+
+    parser.add_argument('--min-price', type=float, default=float(DEFAULT_PARAMS['min_price']), help='最小价格(元)')
+    parser.add_argument('--max-price', type=float, default=float(DEFAULT_PARAMS['max_price']), help='最大价格(元)')
+    parser.add_argument('--min-three-day-change', type=float, default=float(DEFAULT_PARAMS['min_three_day_change']), help='最小三日涨幅(%)')
+    parser.add_argument('--max-three-day-change', type=float, default=float(DEFAULT_PARAMS['max_three_day_change']), help='最大三日涨幅(%)')
+    parser.add_argument('--min-up-days', type=int, default=int(DEFAULT_PARAMS['min_up_days']), help='三日内最少上涨天数')
+    parser.add_argument('--min-avg-volume-ratio', type=float, default=float(DEFAULT_PARAMS['min_avg_volume_ratio']), help='最小三日平均量比')
+    parser.add_argument('--max-ten-day-change', type=float, default=float(DEFAULT_PARAMS['max_ten_day_change']), help='最大十日涨幅(%)')
+    parser.add_argument('--require-above-ma10', action='store_true', help='要求最新价站上 MA10')
+    parser.add_argument('--require-ma-trend', action='store_true', help='要求 MA5>MA10 且 MA10>MA20')
     args = parser.parse_args()
 
+    global STRATEGY_PARAMS
+    STRATEGY_PARAMS = {
+        'min_price': args.min_price,
+        'max_price': args.max_price,
+        'min_three_day_change': args.min_three_day_change,
+        'max_three_day_change': args.max_three_day_change,
+        'min_up_days': args.min_up_days,
+        'min_avg_volume_ratio': args.min_avg_volume_ratio,
+        'max_ten_day_change': args.max_ten_day_change,
+        'require_above_ma10': args.require_above_ma10,
+        'require_ma_trend': args.require_ma_trend,
+    }
+
     print('=' * 80)
-    print('📈 V7 启动捕捉策略 - 增强版')
+    print('📈 V7 启动捕捉策略 - 混合增强版')
     print('=' * 80)
     print(f'数据目录: {TDX_DATA_DIR}')
     print(f'股票代码文件: {STOCK_CODES_FILE}')
     print(f'工作目录: {WORK_DIR}')
     print(f'板块模块: {os.path.join(CURRENT_DIR, "stock_sector.py")}')
     print(f'名称缓存: {STOCK_NAME_CACHE_FILE}')
+    print('筛选参数:')
+    for key, value in STRATEGY_PARAMS.items():
+        print(f'  {key}: {value}')
     print()
 
     codes = load_stock_codes(limit=args.limit, all_stocks=args.all)
@@ -428,7 +631,10 @@ def main():
     if signal_results:
         print('\n🎯 候选股票前10：')
         for i, r in enumerate(signal_results[:10], 1):
-            print(f"{i:2d}. {r['code']} {r['name']} | 分数:{r['score']} | 回测:{r['backtest_return']:.2%} | 板块:{r['main_sector']}")
+            print(
+                f"{i:2d}. {r['code']} {r['name']} | 分数:{r['score']:.2f} | "
+                f"回测:{r['backtest_return']:.2%} | 胜率:{r['backtest_win_rate']:.0%} | 板块:{r['main_sector']}"
+            )
     else:
         print('未找到符合条件的股票')
 

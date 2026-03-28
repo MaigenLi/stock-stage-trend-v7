@@ -28,14 +28,16 @@ V7 启动捕捉策略项目。
 - 支持按数量扫描或全量扫描
 - 支持多线程并发处理
 - 自动排除 `ST` / `*ST` 股票
+- 混合使用“启动信号 + 趋势风控 + 回测统计”
 - 输出候选股票的：
   - 股票名称
   - 主板块
   - 板块分类
   - 板块热度
   - 板块人气
-  - 信号评分
-  - 回测收益
+  - 混合评分
+  - 原始信号分
+  - 回测收益 / 回测次数 / 胜率
 
 ---
 
@@ -114,13 +116,32 @@ python full_scan_gpt_v7.py --limit 200 --workers 8
 - `--limit`：扫描股票数量
 - `--workers`：并发线程数
 
-### 6.2 全量扫描
+### 6.2 常用混合增强参数
+
+```bash
+python full_scan_gpt_v7.py \
+  --all \
+  --workers 8 \
+  --min-price 3 \
+  --max-price 200 \
+  --min-three-day-change 3 \
+  --max-three-day-change 25 \
+  --min-up-days 2 \
+  --min-avg-volume-ratio 1.0 \
+  --max-ten-day-change 35
+```
+
+可选增强过滤：
+- `--require-above-ma10`：要求最新价站上 MA10
+- `--require-ma-trend`：要求 `MA5 > MA10 > MA20`
+
+### 6.3 全量扫描
 
 ```bash
 python full_scan_gpt_v7.py --all --workers 8
 ```
 
-### 6.3 用 `limit=0` 表示全量
+### 6.4 用 `limit=0` 表示全量
 
 ```bash
 python full_scan_gpt_v7.py --limit 0 --workers 8
@@ -143,8 +164,11 @@ v7_candidates_YYYYMMDD_HHMMSS.txt
 
 ```text
 sh600250 南京商旅
-  评分: 8 回测收益: 0.0030
-  价格: 12.91 涨跌: +3.53% 三天: +7.05%
+  评分: 12.50 (原始信号:8) 回测收益: 0.0030
+  回测次数: 6 胜率: 50.00%
+  价格: 12.91 涨跌: +3.53% 三天: +7.05% 十天: +12.40%
+  量比: 三日均量比 1.18 当日量比 1.62 趋势强度 80.0%
+  均线: MA5 12.20 MA10 11.85 MA20 11.30
   板块: 贸易Ⅱ (其他)
   热度: 40 人气: 32 来源: 10jqka
 ```
@@ -169,10 +193,25 @@ v7_candidates_YYYYMMDD_HHMMSS.csv
 - `code`
 - `name`
 - `score`
+- `base_score`
 - `backtest_return`
+- `backtest_signal_count`
+- `backtest_win_rate`
 - `latest_price`
 - `latest_change`
 - `three_day_change`
+- `ten_day_change`
+- `up_days`
+- `avg_volume_ratio`
+- `latest_volume_ratio`
+- `trend_strength`
+- `ma5`
+- `ma10`
+- `ma20`
+- `price_above_ma10`
+- `price_above_ma20`
+- `ma5_above_ma10`
+- `ma10_above_ma20`
 - `main_sector`
 - `sector_category`
 - `sector_hotness`
