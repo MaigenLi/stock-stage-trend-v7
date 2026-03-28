@@ -46,10 +46,10 @@ V7 启动捕捉策略项目。
 4. 东方财富页面回退解析
 
 ### 板块信息
-优先复用：
-- `~/.openclaw/workspace/stock_trend/core/stock_sector.py`
+当前项目已内置本地模块：
+- `stock_sector.py`
 
-如果该模块不可用，则回退到脚本内的简化逻辑。
+主脚本只依赖本项目目录下的 `stock_sector.py`，不再依赖 `stock_trend/` 中的任何板块模块实现。
 
 > 说明：为了避免全量扫描时产生过多网络请求，脚本只会对“命中候选信号”的股票走网络名称/板块补全；非候选股票只做本地推断或跳过增强信息获取。
 
@@ -194,7 +194,7 @@ v7_candidates_YYYYMMDD_HHMMSS_codes.txt
 
 可先检查：
 - 网络是否可用
-- `stock_trend/core/stock_sector.py` 是否存在
+- `stock_sector.py` 是否存在
 
 ### 板块信息来源显示不同
 这是正常的，可能来自：

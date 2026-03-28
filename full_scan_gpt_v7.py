@@ -33,25 +33,19 @@ STOCK_CODES_FILE = os.path.expanduser("~/stock_code/results/stock_codes.txt")
 WORK_DIR = os.path.expanduser("~/.openclaw/workspace/stock_stage_trend/")
 RESULTS_DIR = os.path.join(WORK_DIR, "results")
 CACHE_DIR = os.path.join(WORK_DIR, "sector_cache")
-STOCK_TREND_CORE_DIR = os.path.expanduser("~/.openclaw/workspace/stock_trend/core")
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 STOCK_NAME_CACHE_FILE = os.path.join(WORK_DIR, "stock_name_cache.json")
 STOCK_NAME_CACHE_CANDIDATES = [
     STOCK_NAME_CACHE_FILE,
-    os.path.join(STOCK_TREND_CORE_DIR, "stock_name_cache.json"),
-    os.path.expanduser("~/.openclaw/workspace/stock_trend/stock_name_cache.json"),
 ]
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# 复用 stock_trend 里的板块模块，失败时再回退到本文件内的简化逻辑
-try:
-    if STOCK_TREND_CORE_DIR not in sys.path:
-        sys.path.insert(0, STOCK_TREND_CORE_DIR)
-    from stock_sector import get_sector_info
-    HAS_SECTOR_INFO = True
-except ImportError:
-    HAS_SECTOR_INFO = False
+# 只使用当前项目内置的板块模块，不再依赖 stock_trend 项目
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+from stock_sector import get_sector_info
 
 COMMON_STOCKS = {
     'sh600519': '贵州茅台', 'sz000001': '平安银行', 'sz002460': '赣锋锂业',
@@ -328,12 +322,11 @@ def _normalize_sector_info(sector_info: dict, name: str = ''):
 
 
 def get_stock_sector_info(code: str, name: str = ''):
-    if HAS_SECTOR_INFO:
-        try:
-            sector_info = get_sector_info().get_stock_sector_info(code, name)
-            return _normalize_sector_info(sector_info, name)
-        except Exception:
-            pass
+    try:
+        sector_info = get_sector_info().get_stock_sector_info(code, name)
+        return _normalize_sector_info(sector_info, name)
+    except Exception:
+        pass
 
     cache_file = os.path.join(CACHE_DIR, f'{code}.json')
     if os.path.exists(cache_file):
@@ -540,7 +533,7 @@ def main():
     print(f'数据目录: {TDX_DATA_DIR}')
     print(f'股票代码文件: {STOCK_CODES_FILE}')
     print(f'工作目录: {WORK_DIR}')
-    print(f'板块模块: {"已复用 stock_trend/core/stock_sector.py" if HAS_SECTOR_INFO else "使用内置回退逻辑"}')
+    print(f'板块模块: {os.path.join(CURRENT_DIR, "stock_sector.py")}')
     print()
 
     codes = load_stock_codes(limit=args.limit, all_stocks=args.all)
