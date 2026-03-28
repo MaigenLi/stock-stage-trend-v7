@@ -263,6 +263,14 @@ def get_stock_name(code: str, allow_network: bool = True) -> str:
     return _get_stock_name_from_eastmoney(code)
 
 
+def is_st_stock(name: str) -> bool:
+    if not name or name == '未知':
+        return False
+
+    normalized_name = name.strip().upper().replace(' ', '')
+    return normalized_name.startswith('ST') or normalized_name.startswith('*ST')
+
+
 def _sector_hotness_popularity(sector: str):
     if sector in HOT_SECTORS:
         return 70, 80
@@ -453,6 +461,10 @@ def evaluate_stock(code: str):
 
     # 只对候选股票走网络名称/板块获取，避免全量扫描时对全部股票发请求
     name = get_stock_name(code, allow_network=signal)
+
+    # 排除 ST / *ST 股票，避免进入候选结果
+    if is_st_stock(name):
+        return None
 
     if signal:
         sector_info = get_stock_sector_info(code, name)
